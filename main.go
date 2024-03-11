@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/waku-org/go-waku/waku/v2/node"
@@ -18,9 +22,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var pubsubTopicStr string
+var pubsubTopic = protocol.DefaultPubsubTopic{}
 
 func main() {
+
 	//===== Defining variables for creating the waku instance =====//
 
 	//define content topic here
@@ -28,6 +33,9 @@ func main() {
 		Content topics have 2 purposes: filtering and routing. Filtering is done by changing the {content-topic-name} field. As this part is not hashed, it will not affect routing (shard selection).
 		The {application-name} and {version-of-the-application} fields do affect routing. Using multiple content topics with different {application-name} field has advantages and disadvantages.
 		It increases the traffic a relay node is subjected to when subscribed to all topics. It also allows relay and light nodes to subscribe to a subset of all topics.
+
+		pubsub topics, used for routing
+		Content topics, used for content-based filtering
 	*/
 	cTopic, err := protocol.NewContentTopic("relay-test", "1", "test", "proto") //short length used here /{application-name}/{version-of-the-application}/{content-topic-name}/{encoding}
 	if err != nil {
@@ -62,7 +70,6 @@ func main() {
 		node.WithPrivateKey(prvKey),
 		node.WithHostAddress(hostAddr),
 		node.WithNTP(),
-		node.WithClusterID(uint16(1)), // ..?
 	)
 
 	if err != nil {
@@ -74,11 +81,17 @@ func main() {
 		return
 	}
 
-	pubsubTopic := protocol.NewStaticShardingPubsubTopic(uint16(1), uint16(0))
-	pubsubTopicStr = pubsubTopic.String()
+	go writeLoop(ctx, wakuNode, contentTopic)
 
-	write(ctx, wakuNode, contentTopic, "hello world")
-	readLoop(ctx, wakuNode, contentTopic)
+	go readLoop(ctx, wakuNode, contentTopic)
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
+	fmt.Println("\n\n\nReceived signal, shutting down...")
+
+	// shut the node down
+	wakuNode.Stop()
 
 }
 
@@ -102,16 +115,23 @@ func write(ctx context.Context, wakuNode *node.WakuNode, contentTopic string, ms
 		Timestamp:    utils.GetUnixEpoch(wakuNode.Timesource()),
 	}
 	//publish the message
-	hash, err := wakuNode.Relay().Publish(ctx, msg, relay.WithPubSubTopic(pubsubTopicStr))
+	hash, err := wakuNode.Relay().Publish(ctx, msg, relay.WithPubSubTopic(pubsubTopic.String()))
 	if err != nil {
-		log.Fatalf("Error sending a message: %v", err)
+		log.Fatalf("Error sending a message: %v\n", err)
 	} else {
-		fmt.Printf("Succesfully sent || Message ID: %v", hash)
+		fmt.Printf("Succesfully sent || Message ID: %v\n", hash)
+	}
+}
+
+func writeLoop(ctx context.Context, wakuNode *node.WakuNode, contentTopic string) {
+	for {
+		time.Sleep(2 * time.Second)
+		write(ctx, wakuNode, contentTopic, "Hello world!")
 	}
 }
 
 func readLoop(ctx context.Context, wakuNode *node.WakuNode, contentTopic string) {
-	contentFilter := protocol.NewContentFilter(pubsubTopicStr, contentTopic)
+	contentFilter := protocol.NewContentFilter(pubsubTopic.String())
 	sub, err := wakuNode.Relay().Subscribe(ctx, contentFilter)
 	if err != nil {
 		fmt.Println("Failed to subscribe", err)
@@ -129,6 +149,6 @@ func readLoop(ctx context.Context, wakuNode *node.WakuNode, contentTopic string)
 			continue
 		}
 
-		log.Print("Received msg, ", string(payload.Data))
+		log.Println("Received msg: ", string(payload.Data))
 	}
 }
